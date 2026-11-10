@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1a2b">
+<title>Assistant vocal</title>
+<style>
+:root{--bg:#0e1a2b;--panel:#16263c;--ink:#e8eef6;--mute:#8da2bb;--line:#243a57;--accent:#5eead4;--warn:#fbbf24;--bad:#f87171}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom)}
+#stage{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;padding:18px 0 8px}
+#orb{width:128px;height:128px;border-radius:50%;border:0;cursor:pointer;background:radial-gradient(circle at 35% 30%,#a7f3e6,#2dd4bf 45%,#0f766e);box-shadow:0 0 40px rgba(94,234,212,.35);transition:transform .2s,filter .3s}
+#orb.listening{animation:pulse 1.2s ease-in-out infinite;filter:saturate(1.3)}
+#orb.thinking{animation:spin 1.6s linear infinite;background:conic-gradient(from 0deg,#2dd4bf,#0e1a2b,#2dd4bf);box-shadow:0 0 30px rgba(94,234,212,.25)}
+#orb.speaking{animation:talk .5s ease-in-out infinite alternate;background:radial-gradient(circle at 35% 30%,#fde68a,#fbbf24 45%,#b45309);box-shadow:0 0 50px rgba(251,191,36,.4)}
+@keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.14)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes talk{from{transform:scale(.97)}to{transform:scale(1.1)}}
+@media (prefers-reduced-motion:reduce){#orb{animation:none!important}}
+#state{margin-top:12px;color:var(--mute);font-size:14px;min-height:21px}
+#log{flex:1;overflow-y:auto;padding:8px 14px;display:flex;flex-direction:column;gap:10px}
+.m{max-width:88%;padding:10px 13px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word}
+.u{align-self:flex-end;background:#1d4e5f;border-bottom-right-radius:4px}
+.a{align-self:flex-start;background:var(--panel);border-bottom-left-radius:4px}
+.code{position:relative;margin:8px 0 2px;background:#08111e;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.code pre{margin:0;padding:12px;overflow-x:auto;font:13px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre}
+.code button{position:absolute;top:6px;right:6px;background:var(--line);color:var(--ink);border:0;border-radius:6px;padding:4px 10px;font-size:12px}
+.card{align-self:stretch;border:1px solid var(--warn);border-radius:12px;padding:12px;background:#2a2410}
+.card b{color:var(--warn)}
+.card code{display:block;margin:8px 0;padding:8px;background:#08111e;border-radius:6px;font:13px ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+.card .row{display:flex;gap:8px}
+.card button{flex:1;padding:11px;border:0;border-radius:8px;font-size:15px;font-weight:600}
+.ok{background:var(--accent);color:#04201c}.no{background:var(--line);color:var(--ink)}
+.out{align-self:stretch;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--mute);background:#08111e;border-radius:8px;padding:8px;white-space:pre-wrap;max-height:140px;overflow:auto}
+#bar{display:flex;gap:8px;padding:10px 14px 14px;border-top:1px solid var(--line)}
+#txt{flex:1;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:22px;padding:11px 16px;font-size:16px}
+#lang{align-self:flex-end;margin:0 14px 6px 0;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:16px;padding:6px 10px;font-size:14px}
+.card .row .open{flex:1;padding:10px}
+.open{align-self:stretch;display:block;text-align:center;text-decoration:none;background:var(--accent);color:#04201c;font-weight:600;border-radius:12px;padding:14px}
+#send{width:46px;border:0;border-radius:50%;background:var(--accent);color:#04201c;font-size:20px}
+button:focus-visible,#txt:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+</head>
+<body>
+<div id="stage"><select id="lang" aria-label="Langue"><option value="fr">Français</option><option value="km">Shingazidja (approx.)</option></select><button id="orb" aria-label="Parler à l'assistant"></button><div id="state">Touchez la sphère, puis dites « Saïd »</div></div>
+<div id="log" aria-live="polite"></div>
+<video id="cam" muted playsinline style="position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none"></video>
+<div id="bar"><input id="txt" placeholder="Ou écrivez ici" autocomplete="off"><button id="send" aria-label="Envoyer">↑</button></div>
+<script>
+const $=id=>document.getElementById(id);
+const SID=Math.random().toString(36).slice(2);
+let token=localStorage.getItem('tok')||'';
+let convo=false, rec=null, recActive=false, micPaused=false, speaking=0, speechChain=Promise.resolve(), inflight=0, visionBusy=false;
+const isBusy=()=>inflight>0||visionBusy;
+const note=()=>inflight>0?' — '+inflight+' tâche'+(inflight>1?'s':'')+' en cours':'';
+let LANG=localStorage.getItem('lang')||'fr';
+const SPEECH={fr:'fr-FR',km:'sw-KE'};
+const GREETINGS={fr:'Oui monsieur',km:'Labeka, bwana'};
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+
+function setState(s,label){$('orb').className=s;$('state').textContent=label}
+function esc(t){return t.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+
+const plain=t=>t.replace(/[*＊✱∗•`]+/g,'').replace(/^#+\s*/gm,'');
+function addMsg(text,cls){
+  const d=document.createElement('div');d.className='m '+cls;
+  text.split(/```/).forEach((part,i)=>{
+    if(i%2){
+      const code=part.replace(/^[^\n]*\n/,'');
+      const w=document.createElement('div');w.className='code';
+      w.innerHTML='<button>Copier</button><pre>'+esc(code.trim())+'</pre>';
+      w.querySelector('button').onclick=e=>{navigator.clipboard.writeText(code.trim());e.target.textContent='Copié'};
+      d.appendChild(w);
+    } else if(part.trim()){
+      const s=document.createElement('span');s.textContent=plain(part.trim());d.appendChild(s);
+    }
+  });
+  $('log').appendChild(d);$('log').scrollTop=1e9;
+}
+function addOut(t){const d=document.createElement('div');d.className='out';d.textContent=t;$('log').appendChild(d);$('log').scrollTop=1e9}
+
+async function api(path,body){
+  const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Token':token},body:JSON.stringify({...body,lang:LANG,now:nowStr(),agenda:agendaCtx()})});
+  if(r.status===401){token=prompt("Code d'accès (ASSISTANT_TOKEN) :")||'';localStorage.setItem('tok',token);return api(path,body)}
+  return r.json();
+}
+
+function speak(text,lang){
+  speaking++;stopRec();
+  const p=speechChain.then(()=>utter(text,lang)).catch(()=>{});
+  speechChain=p;
+  return p.then(()=>{speaking--;if(!speaking&&convo)listen()});
+}
+function utter(text,lang){
+  return new Promise(res=>{
+    const clean=plain(text).replace(/https?:\/\/\S+/g,'').replace(/```[\s\S]*?```/g,(LANG==='km'?' ':' Voici le code, affiché à l\'écran. '));
+    if(!clean.trim()||!window.speechSynthesis)return res();
+    const u=new SpeechSynthesisUtterance(clean);const L=lang||SPEECH[LANG];u.lang=L;
+    const v=speechSynthesis.getVoices().find(v=>v.lang.startsWith(L.slice(0,2)));if(v)u.voice=v;
+    u.onend=u.onerror=res;
+    setState('speaking','Je parle… (touchez pour interrompre)');
+    speechSynthesis.speak(u);
+  });
+}
+
+// ===== Agenda (stocké sur cet appareil, rappels tant que la page est ouverte) =====
+const AG='agenda';
+function getAgenda(){try{return JSON.parse(localStorage.getItem(AG)||'[]')}catch(e){return[]}}
+function saveAgenda(a){try{localStorage.setItem(AG,JSON.stringify(a))}catch(e){}}
+const pad=n=>String(n).padStart(2,'0');
+const isoLocal=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
+const compact=d=>d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'T'+pad(d.getHours())+pad(d.getMinutes())+'00';
+const endOf=e=>new Date(new Date(e.start).getTime()+(e.dur||60)*60000);
+function nowStr(){
+  const d=new Date();let tz='';
+  try{tz=Intl.DateTimeFormat().resolvedOptions().timeZone}catch(e){}
+  return isoLocal(d).replace('T',' ')+' ('+d.toLocaleDateString('fr-FR',{weekday:'long'})+', fuseau '+tz+')';
+}
+function agendaCtx(){
+  const from=Date.now()-86400000,to=Date.now()+90*86400000;
+  return getAgenda().filter(e=>{const t=new Date(e.start).getTime();return t>=from&&t<=to})
+    .sort((a,b)=>a.start<b.start?-1:1).slice(0,60)
+    .map(e=>({id:e.id,title:e.title,start:e.start,dur:e.dur,notes:e.notes}));
+}
+function applyAgenda(actions){
+  const a=getAgenda();
+  actions.forEach(x=>{
+    if(x.op==='add'){a.push({...x.event,reminded:false});showEvent(x.event)}
+    else if(x.op==='update'){const e=a.find(v=>v.id===x.id);if(e)Object.assign(e,x.fields,{reminded:false})}
+    else if(x.op==='delete'){const i=a.findIndex(v=>v.id===x.id);if(i>=0)a.splice(i,1)}
+  });
+  saveAgenda(a);
+}
+function showEvent(e){
+  const s=new Date(e.start),en=endOf(e);
+  const when=s.toLocaleString('fr-FR',{weekday:'long',day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'});
+  const g='https://calendar.google.com/calendar/render?action=TEMPLATE&text='+encodeURIComponent(e.title)+'&dates='+compact(s)+'/'+compact(en)+'&details='+encodeURIComponent(e.notes||'');
+  const clean=t=>(t||'').replace(/[\r\n,;]/g,' ');
+  const stamp=new Date().toISOString().replace(/[-:]/g,'').split('.')[0]+'Z';
+  const ics='BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Said//FR\r\nBEGIN:VEVENT\r\nUID:'+e.id+'@said\r\nDTSTAMP:'+stamp+'\r\nDTSTART:'+compact(s)+'\r\nDTEND:'+compact(en)+'\r\nSUMMARY:'+clean(e.title)+'\r\nDESCRIPTION:'+clean(e.notes)+'\r\nBEGIN:VALARM\r\nTRIGGER:-PT'+(e.remind??10)+'M\r\nACTION:DISPLAY\r\nDESCRIPTION:Rappel\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n';
+  const w=document.createElement('div');w.className='card';
+  const b=document.createElement('b');b.textContent='Événement ajouté';
+  const c=document.createElement('code');c.textContent=e.title+' — '+when;
+  const row=document.createElement('div');row.className='row';
+  const a1=document.createElement('a');a1.className='open';a1.textContent='Google Agenda';a1.href=g;a1.target='_blank';a1.rel='noopener';
+  const a2=document.createElement('a');a2.className='open';a2.textContent='Fichier .ics';a2.href='data:text/calendar;charset=utf-8,'+encodeURIComponent(ics);a2.download='evenement.ics';
+  row.append(a1,a2);w.append(b,c,row);
+  $('log').appendChild(w);$('log').scrollTop=1e9;
+}
+function checkReminders(){
+  const a=getAgenda(),now=Date.now();let changed=false;
+  a.forEach(e=>{
+    if(e.reminded)return;
+    const st=new Date(e.start).getTime(),rt=st-(e.remind??10)*60000;
+    if(now<rt)return;
+    e.reminded=true;changed=true;
+    if(now<=endOf(e).getTime()){
+      const txt='Rappel : '+e.title+(now<st?' à '+new Date(st).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}):', c\'est maintenant')+'.';
+      addMsg(txt,'a');speak(txt,'fr-FR');
+      try{if('Notification' in window&&Notification.permission==='granted')new Notification('Saïd — rappel',{body:txt})}catch(x){}
+    }
+  });
+  if(changed)saveAgenda(a);
+}
+
+function openLink(url,label){
+  if(!/^(https?:|tel:|sms:|mailto:|geo:|whatsapp:)/i.test(url))return;
+  const a=document.createElement('a');a.className='open';a.href=url;a.target='_blank';a.rel='noopener';
+  a.textContent='Ouvrir : '+(label||url);
+  a.onclick=()=>{a.textContent='Ouvert : '+(label||url)};
+  $('log').appendChild(a);$('log').scrollTop=1e9;
+  try{const w=window.open(url,'_blank','noopener');if(w)a.textContent='Ouvert : '+(label||url)}catch(e){}
+}
+async function pollJob(id){
+  const d=document.createElement('div');d.className='out';d.textContent='Génération de la vidéo en cours…';
+  $('log').appendChild(d);$('log').scrollTop=1e9;
+  const t0=Date.now();
+  while(Date.now()-t0<900000){
+    await new Promise(r=>setTimeout(r,5000));
+    const r=await fetch('/api/video/'+id,{headers:{'X-Token':token}}).then(x=>x.json()).catch(()=>null);
+    if(!r||r.status==='pending')continue;
+    d.remove();
+    if(r.status==='done'){
+      const v=document.createElement('video');v.src=r.url;v.controls=true;v.playsInline=true;
+      v.style.cssText='max-width:100%;border-radius:12px;align-self:flex-start';
+      $('log').appendChild(v);$('log').scrollTop=1e9;speak('Votre vidéo est prête.');
+    }else addMsg('La génération a échoué : '+(r.error||'erreur inconnue'),'a');
+    return;
+  }
+  d.textContent='La génération prend trop de temps, elle a été abandonnée.';
+}
+async function handle(res){
+  inflight=Math.max(0,inflight-1);
+  if(res.output)addOut(res.output);
+  if(res.type==='confirm'){
+    const c=document.createElement('div');c.className='card';
+    c.innerHTML='<b>Commande à valider</b><code></code><div class="row"><button class="no">Refuser</button><button class="ok">Exécuter</button></div>';
+    c.querySelector('code').textContent=res.command;
+    const done=async ok=>{c.remove();inflight++;if(!recActive)setState('thinking','Réflexion…'+note());try{handle(await api('/api/confirm',{sid:res.sid||SID,approve:ok}))}catch(e){inflight=Math.max(0,inflight-1);addMsg('Connexion au serveur impossible.','a')}};
+    c.querySelector('.ok').onclick=()=>done(true);
+    c.querySelector('.no').onclick=()=>done(false);
+    $('log').appendChild(c);$('log').scrollTop=1e9;
+    setState('','Validation requise');
+    await speak(LANG==='km'?'':'Je veux exécuter une commande. Validez-la à l\'écran.');
+    setState('','Validation requise');
+    return;
+  }
+  addMsg(res.text,'a');
+  if(res.job)pollJob(res.job);
+  if(res.open)res.open.forEach(o=>openLink(o.url,o.label));
+  if(res.agenda)applyAgenda(res.agenda);
+  await speak(res.text);
+  if(!convo&&!isBusy())setState('','Touchez la sphère pour parler');
+  else if(isBusy()&&!recActive&&!speaking)setState('thinking','Réflexion…'+note());
+}
+
+async function send(text){
+  if(!text.trim())return;
+  if(intent(text)){
+    addMsg(text,'u');
+    if(visionBusy){addMsg("Une analyse de la caméra est déjà en cours, je termine d'abord.",'a');return}
+    visionBusy=true;if(!recActive)setState('thinking','Analyse…');
+    try{await vision(text)}finally{visionBusy=false}
+    if(!convo&&!isBusy())setState('','Touchez la sphère pour parler');
+    return;
+  }
+  inflight++;addMsg(text,'u');if(!recActive)setState('thinking','Réflexion…'+note());
+  try{handle(await api('/api/chat',{sid:SID,text}))}
+  catch(e){inflight=Math.max(0,inflight-1);addMsg('Connexion au serveur impossible.','a');if(!isBusy())setState('','Erreur réseau')}
+}
+
+// ===== Vision 100 % vocale : la caméra ne s'allume que le temps d'une analyse, sans aperçu =====
+const TFJS='https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js';
+const COCO='https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js';
+const FACEJS='https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/face-api.js';
+const FACEMODELS='https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/';
+const FR={person:"personne",bicycle:"vélo",car:"voiture",motorcycle:"moto",airplane:"avion",bus:"bus",train:"train",truck:"camion",boat:"bateau","traffic light":"feu de circulation","fire hydrant":"bouche d'incendie","stop sign":"panneau stop","parking meter":"parcmètre",bench:"banc",bird:"oiseau",cat:"chat",dog:"chien",horse:"cheval",sheep:"mouton",cow:"vache",elephant:"éléphant",bear:"ours",zebra:"zèbre",giraffe:"girafe",backpack:"sac à dos",umbrella:"parapluie",handbag:"sac à main",tie:"cravate",suitcase:"valise",frisbee:"frisbee",skis:"skis",snowboard:"snowboard","sports ball":"ballon",kite:"cerf-volant","baseball bat":"batte de baseball","baseball glove":"gant de baseball",skateboard:"skateboard",surfboard:"planche de surf","tennis racket":"raquette de tennis",bottle:"bouteille","wine glass":"verre à vin",cup:"tasse",fork:"fourchette",knife:"couteau",spoon:"cuillère",bowl:"bol",banana:"banane",apple:"pomme",sandwich:"sandwich",orange:"orange",broccoli:"brocoli",carrot:"carotte","hot dog":"hot-dog",pizza:"pizza",donut:"beignet",cake:"gâteau",chair:"chaise",couch:"canapé","potted plant":"plante en pot",bed:"lit","dining table":"table",toilet:"toilettes",tv:"télévision",laptop:"ordinateur portable",mouse:"souris",remote:"télécommande",keyboard:"clavier","cell phone":"téléphone",microwave:"micro-ondes",oven:"four",toaster:"grille-pain",sink:"évier",refrigerator:"réfrigérateur",book:"livre",clock:"horloge",vase:"vase",scissors:"ciseaux","teddy bear":"ours en peluche","hair drier":"sèche-cheveux",toothbrush:"brosse à dents"};
+const fr=k=>FR[k]||k;
+const LS='faces';
+let pref=null, cocoModel=null, facesReady=false;
+const loadedJs={};
+function loadScript(src){return loadedJs[src]||(loadedJs[src]=new Promise((res,rej)=>{const s=document.createElement('script');s.src=src;s.onload=res;s.onerror=()=>{delete loadedJs[src];rej(new Error(src))};document.head.appendChild(s)}))}
+async function loadCoco(){
+  if(cocoModel)return cocoModel;
+  addMsg("Premier chargement du module de détection, cela peut prendre un moment…",'a');
+  await loadScript(TFJS);await loadScript(COCO);
+  cocoModel=await cocoSsd.load();return cocoModel;
+}
+async function loadFaces(){
+  if(facesReady)return;
+  addMsg("Premier chargement du module de reconnaissance faciale, cela peut prendre un moment…",'a');
+  await loadScript(FACEJS);
+  await Promise.all([faceapi.nets.tinyFaceDetector.loadFromUri(FACEMODELS),faceapi.nets.faceLandmark68Net.loadFromUri(FACEMODELS),faceapi.nets.faceRecognitionNet.loadFromUri(FACEMODELS)]);
+  facesReady=true;
+}
+function say(text){addMsg(text,'a');return speak(text,'fr-FR')}
+function listJoin(a){return a.length<2?a.join(''):a.slice(0,-1).join(', ')+' et '+a[a.length-1]}
+function ready(){const v=$('cam');return new Promise(r=>{let n=0;const ok=()=>(v.videoWidth>0||++n>50)?r():setTimeout(ok,100);ok()})}
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+async function withCam(face,f){
+  let st;
+  try{st=await navigator.mediaDevices.getUserMedia({video:{facingMode:pref||face},audio:false})}
+  catch(e){return "Je n'arrive pas à ouvrir la caméra. Autorisez-la dans Chrome."}
+  try{
+    const v=$('cam');v.srcObject=st;await v.play().catch(()=>{});
+    await say("Je regarde dans quelques secondes. Placez la caméra.");
+    await wait(1500);await ready();
+    return await f(v);
+  }finally{st.getTracks().forEach(t=>t.stop());$('cam').srcObject=null}
+}
+function askYesNo(){
+  return new Promise(res=>{
+    if(!SR){res(confirm("Confirmer ?"));return}
+    micPaused=true;stopRec();
+    const r=new SR();r.lang='fr-FR';let done=false;
+    const end=x=>{if(!done){done=true;micPaused=false;res(x);if(convo)setTimeout(listen,300)}};
+    r.onresult=e=>end(/\b(oui|ok|d.accord|vas.y|confirme)\b/.test(norm(e.results[0][0].transcript)));
+    r.onerror=()=>end(false);r.onend=()=>end(false);
+    setState('listening','Dites oui ou non…');
+    try{r.start()}catch(e){end(false)}
+    setTimeout(()=>{try{r.abort()}catch(e){}end(false)},9000);
+  });
+}
+async function describe(){
+  let model;try{model=await loadCoco()}catch(e){return say("Le module de détection n'a pas pu se charger. Vérifiez la connexion.")}
+  return say(await withCam('environment',async v=>{
+    let preds=[];
+    for(let i=0;i<3&&!preds.length;i++){preds=(await model.detect(v)).filter(p=>p.score>0.5);if(!preds.length)await wait(600)}
+    if(!preds.length)return "Je ne vois aucun objet que je connaisse.";
+    const c={};preds.forEach(p=>{const k=fr(p.class);c[k]=(c[k]||0)+1});
+    return "Je vois : "+listJoin(Object.entries(c).map(([k,n])=>n+' '+k+(n>1&&!k.endsWith('s')?'s':'')))+".";
+  }));
+}
+function knownFaces(){try{return JSON.parse(localStorage.getItem(LS)||'[]')}catch(e){return[]}}
+function saveFaces(a){try{localStorage.setItem(LS,JSON.stringify(a));return true}catch(e){return false}}
+async function seeFaces(v){
+  let det=[];
+  for(let i=0;i<3&&!det.length;i++){det=await faceapi.detectAllFaces(v,new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptors();if(!det.length)await wait(600)}
+  return det;
+}
+async function who(){
+  const k=knownFaces();
+  if(!k.length)return say("Je ne connais encore personne. Dites : retiens ce visage, c'est suivi d'un prénom.");
+  try{await loadFaces()}catch(e){return say("Le module de reconnaissance faciale n'a pas pu se charger. Vérifiez la connexion.")}
+  return say(await withCam('user',async v=>{
+    const det=await seeFaces(v);
+    if(!det.length)return "Je ne vois aucun visage.";
+    const by={};k.forEach(f=>{(by[f.name]=by[f.name]||[]).push(new Float32Array(f.d))});
+    const m=new faceapi.FaceMatcher(Object.entries(by).map(([n,d])=>new faceapi.LabeledFaceDescriptors(n,d)),0.5);
+    const names=det.map(d=>{const r=m.findBestMatch(d.descriptor);return r.label==='unknown'?null:r.label});
+    const ok=[...new Set(names.filter(Boolean))],unk=names.filter(n=>!n).length,parts=[];
+    if(ok.length)parts.push("Je reconnais "+listJoin(ok));
+    if(unk)parts.push(unk+(unk>1?" personnes que je ne connais pas":" personne que je ne connais pas"));
+    return parts.join(", et ")+".";
+  }));
+}
+async function enroll(name){
+  name=(name||'').trim();
+  if(!name)return say("Dites : retiens ce visage, c'est suivi du prénom.");
+  try{await loadFaces()}catch(e){return say("Le module de reconnaissance faciale n'a pas pu se charger. Vérifiez la connexion.")}
+  let desc=null;
+  const msg=await withCam('user',async v=>{
+    const det=await seeFaces(v);
+    if(det.length!==1)return det.length?"Je vois plusieurs visages. Un seul à la fois, s'il vous plaît.":"Je ne vois aucun visage.";
+    desc=Array.from(det[0].descriptor);return null;
+  });
+  if(!desc)return say(msg);
+  await say("J'ai bien vu le visage. Voulez-vous que je le retienne sous le nom "+name+" ? Faites-le seulement avec l'accord de la personne. Dites oui ou non.");
+  if(!(await askYesNo()))return say("D'accord, je n'enregistre rien.");
+  const k=knownFaces();k.push({name,d:desc});
+  if(!saveFaces(k))return say("Impossible d'enregistrer sur cet appareil.");
+  return say("C'est noté, je retiens "+name+".");
+}
+async function forget(){
+  await say("Voulez-vous que j'efface tous les visages enregistrés ? Dites oui ou non.");
+  if(!(await askYesNo()))return say("D'accord, je garde tout.");
+  try{localStorage.removeItem(LS)}catch(e){}
+  return say("Tous les visages ont été effacés.");
+}
+function intent(t){
+  const n=norm(t);
+  if(/oublie|efface|supprime/.test(n)&&/visages?/.test(n))return 'forget';
+  if(/camera/.test(n)&&/avant|selfie|frontale|arriere|principale|dorsale|automatique/.test(n))return 'flip';
+  if(/retiens|enregistre|memorise|apprends/.test(n)&&/visage|personne|c.est|appelle/.test(n))return 'enroll';
+  if(/qui est.ce|qui suis.je|qui c.est/.test(n))return 'who';
+  if(/que vois.tu|qu.est.ce que tu vois|tu vois quoi|devant moi|autour de moi|quels? objets?|decris.moi (ce que|la piece|la scene)|regarde (autour|devant)/.test(n))return 'objects';
+  return null;
+}
+async function vision(t){
+  const i=intent(t),n=norm(t);
+  if(i==='forget')return forget();
+  if(i==='flip'){pref=/avant|selfie|frontale/.test(n)?'user':/arriere|principale|dorsale/.test(n)?'environment':null;return say(pref==='user'?"D'accord, j'utiliserai la caméra avant.":pref==='environment'?"D'accord, j'utiliserai la caméra arrière.":"D'accord, je choisirai la caméra tout seul.")}
+  if(i==='enroll'){const m=t.match(/(?:c['’ ]est|s['’ ]appelle|appelle)\s+([\p{L}'’-]+)/u);return enroll(m&&m[1])}
+  if(i==='who')return who();
+  if(i==='objects')return describe();
+}
+
+const NAME='Saïd', NAMES=['said','sa id','sayid','sayed','saeed','sahid','saied'];
+let awake=false;
+const norm=s=>s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+async function onHeard(t){
+  const n=norm(t), hit=NAMES.find(w=>n.includes(w));
+  if(!hit&&!awake){if(convo)listen();return}
+  awake=true;
+  let rest=t;
+  if(hit)rest=t.slice(n.indexOf(hit)+hit.length).replace(/^[\s,.!?:;-]+/,'');
+  if(hit){addMsg(NAME+' ?','u');const g=GREETINGS[LANG];addMsg(g,'a');await speak(g)}
+  if(rest.trim()){send(rest);listen()}else listen();
+}
+function stopRec(){if(rec&&recActive){rec._ab=true;recActive=false;try{rec.abort()}catch(e){}}}
+function listen(){
+  if(recActive||speaking||micPaused)return;
+  if(!SR){setState('','Reconnaissance vocale non prise en charge ici : écrivez votre message');return}
+  const r=rec=new SR();r.lang=SPEECH[LANG];r.interimResults=true;
+  let final='';recActive=true;
+  r.onstart=()=>setState('listening',(awake?'Je vous écoute…':'En veille : dites « '+NAME+' »')+note());
+  r.onresult=e=>{let t='';for(const x of e.results){t+=x[0].transcript;if(x.isFinal)final=t}
+    $('state').textContent=t};
+  r.onerror=e=>{if(e.error!=='no-speech'&&e.error!=='aborted'){convo=false;setState('','Micro indisponible ('+e.error+')')}};
+  r.onend=()=>{
+    if(rec===r)recActive=false;
+    if(r._ab)return;
+    if(final)onHeard(final);
+    else{awake=false;if(convo)listen();else if(!isBusy())setState('','Touchez la sphère pour parler')}
+  };
+  try{r.start()}catch(e){recActive=false}
+}
+
+$('lang').value=LANG;
+$('lang').onchange=e=>{LANG=e.target.value;localStorage.setItem('lang',LANG);if(convo){stopRec();setTimeout(listen,300)}};
+$('orb').onclick=()=>{
+  try{if('Notification' in window&&Notification.permission==='default')Notification.requestPermission()}catch(e){}
+  if(speechSynthesis.speaking){speechSynthesis.cancel();return}
+  if(convo){convo=false;awake=false;stopRec();setState('','Conversation arrêtée');return}
+  convo=true;listen();
+};
+$('send').onclick=()=>{send($('txt').value);$('txt').value=''};
+$('txt').onkeydown=e=>{if(e.key==='Enter'){send($('txt').value);$('txt').value=''}};
+setInterval(checkReminders,20000);checkReminders();
+if(!token){token=prompt("Code d'accès (ASSISTANT_TOKEN) :")||'';localStorage.setItem('tok',token)}
+</script>
+</body>
+</html>
